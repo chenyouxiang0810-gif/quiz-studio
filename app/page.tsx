@@ -216,16 +216,15 @@ function wrongQuestionCount(section: QuizSection, progress: QuizProgress) {
   return section.questions.filter((question) => progress.answers[question.id] !== question.correctChoiceId).length;
 }
 
-function totalWrongCount(record: QuizRecord) {
-  return record.quiz.sections.reduce((sum, section) => sum + wrongQuestionCount(section, record.progress), 0);
-}
-
-function unfamiliarItemIds(section: QuizSection, progress: QuizProgress): Set<string> {
-  if (!progress.checkedSections?.[section.id]) return new Set();
-  const ids = section.questions
+function unfamiliarItemCounts(section: QuizSection, progress: QuizProgress): Record<string, number> {
+  if (!progress.checkedSections?.[section.id]) return {};
+  return section.questions
     .filter((question) => progress.answers[question.id] !== question.correctChoiceId)
-    .flatMap((question) => relatedItemIdsForQuestion(question, section));
-  return new Set(ids);
+    .flatMap((question) => relatedItemIdsForQuestion(question, section))
+    .reduce<Record<string, number>>((counts, itemId) => {
+      counts[itemId] = (counts[itemId] || 0) + 1;
+      return counts;
+    }, {});
 }
 
 export default function Home() {
@@ -483,7 +482,7 @@ export default function Home() {
   }
 
   const totalQuestions = records.reduce((sum, record) => sum + questionCount(record.quiz), 0);
-  const totalWrong = records.reduce((sum, record) => sum + totalWrongCount(record), 0);
+  const totalAnswered = records.reduce((sum, record) => sum + answeredCount(record), 0);
 
   return (
     <main className="min-h-screen overflow-hidden bg-[#f6f6f3] text-zinc-950">
@@ -536,7 +535,7 @@ export default function Home() {
             <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜尋標題、分類或 Part" />
           </label>
           <MetricCard label="Quiz" value={records.length} />
-          <MetricCard label="錯題 / 題目" value={`${totalWrong} / ${totalQuestions}`} />
+          <MetricCard label="已作答 / 題目" value={`${totalAnswered} / ${totalQuestions}`} />
         </section>
 
         {!firebaseReady && (
@@ -593,7 +592,7 @@ function MetricCard({ label, value }: { label: string; value: number | string })
 
 function QuizCard({ record, onOpen, onDelete }: { record: QuizRecord; onOpen: () => void; onDelete: () => void }) {
   const total = questionCount(record.quiz);
-  const wrong = totalWrongCount(record);
+  const terms = record.quiz.sections.reduce((sum, section) => sum + section.studyItems.length, 0);
   const progress = total ? Math.round((answeredCount(record) / total) * 100) : 0;
   return (
     <article className="quiz-card group">
@@ -609,8 +608,8 @@ function QuizCard({ record, onOpen, onDelete }: { record: QuizRecord; onOpen: ()
       <p className="line-clamp-2 min-h-12 text-sm leading-6 text-zinc-500">{record.quiz.description || '這份 Quiz 尚未加入描述。'}</p>
       <div className="mt-6 grid grid-cols-3 gap-2">
         <PreviewStat label="Part" value={record.quiz.sections.length} />
+        <PreviewStat label="成語" value={terms} />
         <PreviewStat label="題目" value={total} />
-        <PreviewStat label="錯題" value={wrong} />
       </div>
       <div className="mt-6">
         <div className="mb-2 flex items-center justify-between text-xs text-zinc-500">
@@ -670,7 +669,7 @@ function QuizPlayer({
   const answered = section.questions.filter((question) => record.progress.answers[question.id]).length;
   const score = sectionScore(section, record.progress);
   const wrong = wrongQuestionCount(section, record.progress);
-  const unfamiliar = unfamiliarItemIds(section, record.progress);
+  const unfamiliarCounts = unfamiliarItemCounts(section, record.progress);
   const questions = orderedQuestions(section, record.progress);
   const allAnswered = answered === section.questions.length;
   const total = questionCount(record.quiz);
@@ -733,11 +732,11 @@ function QuizPlayer({
               </div>
               <div className="term-grid">
                 {section.studyItems.map((item, index) => (
-                  <article className={`term-card ${unfamiliar.has(item.id) ? 'unfamiliar' : ''}`} key={item.id}>
+                  <article className={`term-card ${unfamiliarCounts[item.id] ? 'unfamiliar' : ''}`} key={item.id}>
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex items-center gap-2">
                         <span className="term-index">{String(index + 1).padStart(2, '0')}</span>
-                        {unfamiliar.has(item.id) && <span className="unfamiliar-pill">不熟悉</span>}
+                        {unfamiliarCounts[item.id] && <span className="unfamiliar-pill">不熟悉 · 錯 {unfamiliarCounts[item.id]} 題</span>}
                       </div>
                       <button className="icon-button" type="button" aria-label={`朗讀 ${item.term}`} onClick={() => onSpeak(item, record.quiz.locale)}>
                         <Headphones className="h-4 w-4" />
