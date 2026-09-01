@@ -483,7 +483,7 @@ export default function Home() {
   }
 
   const totalQuestions = records.reduce((sum, record) => sum + questionCount(record.quiz), 0);
-  const totalAnswered = records.reduce((sum, record) => sum + answeredCount(record), 0);
+  const totalWrong = records.reduce((sum, record) => sum + totalWrongCount(record), 0);
 
   return (
     <main className="min-h-screen overflow-hidden bg-[#f6f6f3] text-zinc-950">
@@ -536,7 +536,7 @@ export default function Home() {
             <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜尋標題、分類或 Part" />
           </label>
           <MetricCard label="Quiz" value={records.length} />
-          <MetricCard label="已作答 / 題目" value={`${totalAnswered} / ${totalQuestions}`} />
+          <MetricCard label="錯題 / 題目" value={`${totalWrong} / ${totalQuestions}`} />
         </section>
 
         {!firebaseReady && (
