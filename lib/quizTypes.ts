@@ -51,6 +51,7 @@ export type QuizProgress = {
   lastSectionId?: string;
   answers: Record<string, ChoiceId>;
   checkedSections: Record<string, boolean>;
+  questionOrderBySection?: Record<string, string[]>;
 };
 
 export type QuizRecord = {

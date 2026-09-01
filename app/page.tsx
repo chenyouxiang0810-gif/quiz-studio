@@ -44,11 +44,12 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { buildSpeakText, normalizeQuiz } from '../lib/quizSchema';
 import { sampleQuiz } from '../lib/sampleQuiz';
-import type { ChoiceId, QuizDocument, QuizProgress, QuizRecord, QuizSection, StudyItem } from '../lib/quizTypes';
+import type { ChoiceId, QuizDocument, QuizProgress, QuizQuestion, QuizRecord, QuizSection, StudyItem } from '../lib/quizTypes';
 
 type FirebaseBundle = { app: FirebaseApp; db: Firestore; auth: ReturnType<typeof getAuth> };
 
 const STORAGE_KEY = 'quiz-studio.records.v1';
+const BACKUP_STORAGE_KEY = 'quiz-studio.records.backup.v1';
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
   authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
@@ -70,13 +71,23 @@ function getFirebase(): FirebaseBundle | null {
 
 function createRecord(quiz: QuizDocument): QuizRecord {
   const now = new Date().toISOString();
+  const migratedQuiz = migrateQuiz(quiz);
   return {
     id: crypto.randomUUID(),
-    quiz: migrateQuiz(quiz),
+    quiz: migratedQuiz,
     createdAt: now,
     updatedAt: now,
     lastOpenedAt: now,
-    progress: { lastSectionId: quiz.sections[0]?.id, answers: {}, checkedSections: {} },
+    progress: createInitialProgress(migratedQuiz),
+  };
+}
+
+function createInitialProgress(quiz: QuizDocument): QuizProgress {
+  return {
+    lastSectionId: quiz.sections[0]?.id,
+    answers: {},
+    checkedSections: {},
+    questionOrderBySection: Object.fromEntries(quiz.sections.map((section) => [section.id, section.questions.map((question) => question.id)])),
   };
 }
 
@@ -94,6 +105,47 @@ function migrateQuiz(quiz: QuizDocument): QuizDocument {
   };
 }
 
+function normalizeRecord(record: QuizRecord): QuizRecord {
+  const quiz = migrateQuiz(record.quiz);
+  return {
+    ...record,
+    quiz,
+    progress: migrateProgress(record.progress, quiz),
+  };
+}
+
+function migrateProgress(progress: QuizProgress | undefined, quiz: QuizDocument): QuizProgress {
+  const answers = progress && typeof progress.answers === 'object' && progress.answers ? progress.answers : {};
+  const checkedSections = progress && typeof progress.checkedSections === 'object' && progress.checkedSections ? progress.checkedSections : {};
+  const existingOrder = progress?.questionOrderBySection || {};
+  const questionOrderBySection = Object.fromEntries(
+    quiz.sections.map((section) => {
+      const validIds = new Set(section.questions.map((question) => question.id));
+      const saved = Array.isArray(existingOrder[section.id]) ? existingOrder[section.id].filter((id) => validIds.has(id)) : [];
+      const missing = section.questions.map((question) => question.id).filter((id) => !saved.includes(id));
+      return [section.id, [...saved, ...missing]];
+    }),
+  );
+  return {
+    lastSectionId: progress?.lastSectionId || quiz.sections[0]?.id,
+    answers,
+    checkedSections,
+    questionOrderBySection,
+  };
+}
+
+function backupLocalPayload(payload: string, reason: string) {
+  try {
+    const existing = window.localStorage.getItem(BACKUP_STORAGE_KEY);
+    const backups = existing ? JSON.parse(existing) : [];
+    const nextBackups = Array.isArray(backups) ? backups : [];
+    nextBackups.unshift({ savedAt: new Date().toISOString(), reason, payload });
+    window.localStorage.setItem(BACKUP_STORAGE_KEY, JSON.stringify(nextBackups.slice(0, 5)));
+  } catch {
+    window.localStorage.setItem(`${BACKUP_STORAGE_KEY}.${Date.now()}`, payload);
+  }
+}
+
 function loadLocalRecords(): QuizRecord[] {
   const saved = window.localStorage.getItem(STORAGE_KEY);
   if (!saved) {
@@ -104,7 +156,8 @@ function loadLocalRecords(): QuizRecord[] {
   try {
     const parsed = JSON.parse(saved) as QuizRecord[];
     if (!Array.isArray(parsed) || !parsed.length) return [createRecord(sampleQuiz)];
-    const migrated = parsed.map((record) => ({ ...record, quiz: migrateQuiz(record.quiz) }));
+    backupLocalPayload(saved, 'before-progress-migration');
+    const migrated = parsed.map(normalizeRecord);
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
     return migrated;
   } catch {
@@ -120,7 +173,6 @@ function normalizeDate(value: unknown): string {
 }
 
 const questionCount = (quiz: QuizDocument) => quiz.sections.reduce((sum, section) => sum + section.questions.length, 0);
-const studyCount = (quiz: QuizDocument) => quiz.sections.reduce((sum, section) => sum + section.studyItems.length, 0);
 const answeredCount = (record: QuizRecord) => Object.keys(record.progress.answers || {}).length;
 const saveLocal = (records: QuizRecord[]) => window.localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
 const formatTime = (value?: string) =>
@@ -129,6 +181,52 @@ const formatTime = (value?: string) =>
     : '尚未記錄';
 const sectionScore = (section: QuizSection, progress: QuizProgress) =>
   section.questions.reduce((score, question) => score + (progress.answers[question.id] === question.correctChoiceId ? 1 : 0), 0);
+
+function orderedQuestions(section: QuizSection, progress: QuizProgress): QuizQuestion[] {
+  const byId = new Map(section.questions.map((question) => [question.id, question]));
+  const savedOrder = progress.questionOrderBySection?.[section.id] || [];
+  const ordered = savedOrder.map((id) => byId.get(id)).filter(Boolean) as QuizQuestion[];
+  const missing = section.questions.filter((question) => !savedOrder.includes(question.id));
+  return [...ordered, ...missing];
+}
+
+function shuffledQuestionIds(section: QuizSection, previousOrder: string[] = []): string[] {
+  const ids = section.questions.map((question) => question.id);
+  for (let index = ids.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [ids[index], ids[swapIndex]] = [ids[swapIndex], ids[index]];
+  }
+  if (ids.length > 1 && previousOrder.length === ids.length && ids.every((id, index) => id === previousOrder[index])) {
+    ids.push(ids.shift()!);
+  }
+  return ids;
+}
+
+function relatedItemIdsForQuestion(question: QuizQuestion, section: QuizSection): string[] {
+  if (question.relatedItemIds?.length) return question.relatedItemIds;
+  const correctText = question.choices.find((choice) => choice.id === question.correctChoiceId)?.text;
+  if (!correctText) return [];
+  return section.studyItems
+    .filter((item) => item.term === correctText || item.speakText === correctText)
+    .map((item) => item.id);
+}
+
+function wrongQuestionCount(section: QuizSection, progress: QuizProgress) {
+  if (!progress.checkedSections?.[section.id]) return 0;
+  return section.questions.filter((question) => progress.answers[question.id] !== question.correctChoiceId).length;
+}
+
+function totalWrongCount(record: QuizRecord) {
+  return record.quiz.sections.reduce((sum, section) => sum + wrongQuestionCount(section, record.progress), 0);
+}
+
+function unfamiliarItemIds(section: QuizSection, progress: QuizProgress): Set<string> {
+  if (!progress.checkedSections?.[section.id]) return new Set();
+  const ids = section.questions
+    .filter((question) => progress.answers[question.id] !== question.correctChoiceId)
+    .flatMap((question) => relatedItemIdsForQuestion(question, section));
+  return new Set(ids);
+}
 
 export default function Home() {
   const [records, setRecords] = useState<QuizRecord[]>([]);
@@ -179,14 +277,14 @@ export default function Home() {
       }
       setRecords(snapshot.docs.map((item) => {
         const data = item.data();
-        return {
+        return normalizeRecord({
           id: item.id,
-          quiz: migrateQuiz(data.quiz as QuizDocument),
+          quiz: data.quiz as QuizDocument,
           createdAt: normalizeDate(data.createdAt),
           updatedAt: normalizeDate(data.updatedAt),
           lastOpenedAt: normalizeDate(data.lastOpenedAt),
           progress: (data.progress as QuizProgress) ?? { answers: {}, checkedSections: {} },
-        };
+        });
       }));
       setLoading(false);
     }, () => setLoading(false));
@@ -296,6 +394,8 @@ export default function Home() {
 
   async function chooseAnswer(questionId: string, choiceId: ChoiceId) {
     if (!selectedRecord) return;
+    const questionSection = selectedRecord.quiz.sections.find((section) => section.questions.some((question) => question.id === questionId));
+    if (questionSection && selectedRecord.progress.checkedSections?.[questionSection.id]) return;
     await persistRecord({
       ...selectedRecord,
       progress: { ...selectedRecord.progress, answers: { ...selectedRecord.progress.answers, [questionId]: choiceId } },
@@ -326,7 +426,21 @@ export default function Home() {
     section.questions.forEach((question) => delete answers[question.id]);
     const checkedSections = { ...selectedRecord.progress.checkedSections };
     delete checkedSections[section.id];
-    await persistRecord({ ...selectedRecord, progress: { ...selectedRecord.progress, answers, checkedSections }, updatedAt: new Date().toISOString() });
+    const previousOrder = selectedRecord.progress.questionOrderBySection?.[section.id];
+    await persistRecord({
+      ...selectedRecord,
+      progress: {
+        ...selectedRecord.progress,
+        answers,
+        checkedSections,
+        questionOrderBySection: {
+          ...selectedRecord.progress.questionOrderBySection,
+          [section.id]: shuffledQuestionIds(section, previousOrder),
+        },
+      },
+      updatedAt: new Date().toISOString(),
+      lastOpenedAt: new Date().toISOString(),
+    });
     setMode('quiz');
   }
 
@@ -479,6 +593,7 @@ function MetricCard({ label, value }: { label: string; value: number | string })
 
 function QuizCard({ record, onOpen, onDelete }: { record: QuizRecord; onOpen: () => void; onDelete: () => void }) {
   const total = questionCount(record.quiz);
+  const wrong = totalWrongCount(record);
   const progress = total ? Math.round((answeredCount(record) / total) * 100) : 0;
   return (
     <article className="quiz-card group">
@@ -494,8 +609,8 @@ function QuizCard({ record, onOpen, onDelete }: { record: QuizRecord; onOpen: ()
       <p className="line-clamp-2 min-h-12 text-sm leading-6 text-zinc-500">{record.quiz.description || '這份 Quiz 尚未加入描述。'}</p>
       <div className="mt-6 grid grid-cols-3 gap-2">
         <PreviewStat label="Part" value={record.quiz.sections.length} />
-        <PreviewStat label="成語" value={studyCount(record.quiz)} />
         <PreviewStat label="題目" value={total} />
+        <PreviewStat label="錯題" value={wrong} />
       </div>
       <div className="mt-6">
         <div className="mb-2 flex items-center justify-between text-xs text-zinc-500">
@@ -554,6 +669,9 @@ function QuizPlayer({
   const checked = Boolean(record.progress.checkedSections?.[section.id]);
   const answered = section.questions.filter((question) => record.progress.answers[question.id]).length;
   const score = sectionScore(section, record.progress);
+  const wrong = wrongQuestionCount(section, record.progress);
+  const unfamiliar = unfamiliarItemIds(section, record.progress);
+  const questions = orderedQuestions(section, record.progress);
   const allAnswered = answered === section.questions.length;
   const total = questionCount(record.quiz);
   const totalDone = answeredCount(record);
@@ -606,16 +724,21 @@ function QuizPlayer({
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div>
                     <h3 className="text-xl font-semibold">先看教材，朗讀成語與意思</h3>
-                    <p className="mt-1 text-sm text-zinc-500">每個播放鍵會念「成語，意思：內容」，不會朗讀選擇題。</p>
+                    <p className="mt-1 text-sm text-zinc-500">
+                      本 Part 共 {section.questions.length} 題，錯 {wrong} 題。每個播放鍵會念「成語，意思：內容」，不會朗讀選擇題。
+                    </p>
                   </div>
                   <button className="dark-button" type="button" onClick={() => onMode('quiz')}>開始本 Part 題目<ChevronRight className="h-4 w-4" /></button>
                 </div>
               </div>
               <div className="term-grid">
                 {section.studyItems.map((item, index) => (
-                  <article className="term-card" key={item.id}>
+                  <article className={`term-card ${unfamiliar.has(item.id) ? 'unfamiliar' : ''}`} key={item.id}>
                     <div className="flex items-start justify-between gap-3">
-                      <span className="term-index">{String(index + 1).padStart(2, '0')}</span>
+                      <div className="flex items-center gap-2">
+                        <span className="term-index">{String(index + 1).padStart(2, '0')}</span>
+                        {unfamiliar.has(item.id) && <span className="unfamiliar-pill">不熟悉</span>}
+                      </div>
                       <button className="icon-button" type="button" aria-label={`朗讀 ${item.term}`} onClick={() => onSpeak(item, record.quiz.locale)}>
                         <Headphones className="h-4 w-4" />
                       </button>
@@ -634,7 +757,10 @@ function QuizPlayer({
                 <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                   <div>
                     <h3 className="text-xl font-semibold">一次完成本 Part 的所有題目</h3>
-                    <p className="mt-1 text-sm text-zinc-500">已選 {answered} / {section.questions.length}{checked ? `，本次答對 ${score} 題` : ''}</p>
+                    <p className="mt-1 text-sm text-zinc-500">
+                      已選 {answered} / {section.questions.length}
+                      {checked ? `，本次答對 ${score} 題，錯 ${wrong} 題。批改後答案已固定，按重做才可重新作答。` : ''}
+                    </p>
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <button className="quiet-button" type="button" onClick={onResetSection}><RefreshCw className="h-4 w-4" />重做</button>
@@ -643,7 +769,7 @@ function QuizPlayer({
                 </div>
               </div>
 
-              {section.questions.map((question, index) => {
+              {questions.map((question, index) => {
                 const selected = record.progress.answers[question.id];
                 const isCorrect = selected === question.correctChoiceId;
                 return (
@@ -665,6 +791,7 @@ function QuizPlayer({
                             key={choice.id}
                             type="button"
                             className={`choice-button ${choiceSelected ? 'selected' : ''} ${isAnswer ? 'answer' : ''} ${isWrongPick ? 'wrong' : ''}`}
+                            disabled={checked}
                             onClick={() => onAnswer(question.id, choice.id)}
                           >
                             <span>{choice.id}</span>
