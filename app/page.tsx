@@ -42,6 +42,7 @@ import {
   X,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { defaultQuizzes } from '../lib/defaultQuizzes';
 import { buildSpeakText, normalizeQuiz } from '../lib/quizSchema';
 import { sampleQuiz } from '../lib/sampleQuiz';
 import type { ChoiceId, QuizDocument, QuizProgress, QuizQuestion, QuizRecord, QuizSection, StudyItem } from '../lib/quizTypes';
@@ -80,6 +81,18 @@ function createRecord(quiz: QuizDocument): QuizRecord {
     lastOpenedAt: now,
     progress: createInitialProgress(migratedQuiz),
   };
+}
+
+function createDefaultRecord(quiz: QuizDocument, index: number): QuizRecord {
+  const lessonNumber = lessonOrderValue(quiz.title);
+  return {
+    ...createRecord(quiz),
+    id: `default-lesson-${String(lessonNumber ?? index + 1).padStart(2, '0')}`,
+  };
+}
+
+function createDefaultRecords(): QuizRecord[] {
+  return defaultQuizzes.map((quiz, index) => createDefaultRecord(quiz, index)).sort(compareQuizRecords);
 }
 
 function createInitialProgress(quiz: QuizDocument): QuizProgress {
@@ -149,19 +162,24 @@ function backupLocalPayload(payload: string, reason: string) {
 function loadLocalRecords(): QuizRecord[] {
   const saved = window.localStorage.getItem(STORAGE_KEY);
   if (!saved) {
-    const initial = [createRecord(sampleQuiz)];
+    const initial = createDefaultRecords();
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(initial));
     return initial;
   }
   try {
     const parsed = JSON.parse(saved) as QuizRecord[];
-    if (!Array.isArray(parsed) || !parsed.length) return [createRecord(sampleQuiz)];
+    if (!Array.isArray(parsed) || !parsed.length) {
+      const initial = createDefaultRecords();
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(initial));
+      return initial;
+    }
     backupLocalPayload(saved, 'before-progress-migration');
     const migrated = parsed.map(normalizeRecord);
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
     return migrated;
   } catch {
-    return [createRecord(sampleQuiz)];
+    backupLocalPayload(saved, 'unreadable-records');
+    return createDefaultRecords();
   }
 }
 
@@ -181,6 +199,44 @@ const formatTime = (value?: string) =>
     : '尚未記錄';
 const sectionScore = (section: QuizSection, progress: QuizProgress) =>
   section.questions.reduce((score, question) => score + (progress.answers[question.id] === question.correctChoiceId ? 1 : 0), 0);
+
+function parseChineseLessonNumber(value: string): number | null {
+  const digitMap: Record<string, number> = { 零: 0, 〇: 0, 一: 1, 二: 2, 兩: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  const normalized = value.trim();
+  if (!normalized) return null;
+  if (/^\d+$/.test(normalized)) return Number(normalized);
+  if (!/^[零〇一二兩三四五六七八九十百]+$/.test(normalized)) return null;
+  const hundredParts = normalized.split('百');
+  let total = 0;
+  let rest = normalized;
+  if (hundredParts.length > 1) {
+    total += (hundredParts[0] ? digitMap[hundredParts[0]] : 1) * 100;
+    rest = hundredParts.slice(1).join('百');
+  }
+  if (rest.includes('十')) {
+    const [tens, ones] = rest.split('十');
+    total += (tens ? digitMap[tens] : 1) * 10;
+    total += ones ? digitMap[ones] : 0;
+    return Number.isFinite(total) ? total : null;
+  }
+  const digits = [...rest].map((char) => digitMap[char]);
+  if (digits.some((digit) => digit === undefined)) return null;
+  return total + digits.reduce((sum, digit) => sum * 10 + digit, 0);
+}
+
+function lessonOrderValue(title: string): number | null {
+  const match = title.match(/第\s*([0-9]+|[零〇一二兩三四五六七八九十百]+)\s*課/);
+  return match ? parseChineseLessonNumber(match[1]) : null;
+}
+
+function compareQuizRecords(a: QuizRecord, b: QuizRecord) {
+  const lessonA = lessonOrderValue(a.quiz.title);
+  const lessonB = lessonOrderValue(b.quiz.title);
+  if (lessonA !== null && lessonB !== null && lessonA !== lessonB) return lessonA - lessonB;
+  if (lessonA !== null && lessonB === null) return -1;
+  if (lessonA === null && lessonB !== null) return 1;
+  return a.quiz.title.localeCompare(b.quiz.title, 'zh-Hant');
+}
 
 function orderedQuestions(section: QuizSection, progress: QuizProgress): QuizQuestion[] {
   const byId = new Map(section.questions.map((question) => [question.id, question]));
@@ -265,13 +321,16 @@ export default function Home() {
     const q = query(collection(firebase.db, 'users', user.uid, 'quizzes'), orderBy('updatedAt', 'desc'));
     unsubscribeRef.current = onSnapshot(q, async (snapshot) => {
       if (snapshot.empty) {
-        const record = { ...createRecord(sampleQuiz), id: 'demo-idiom-quiz' };
-        await setDoc(doc(firebase.db, 'users', user.uid, 'quizzes', record.id), {
-          ...record,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-          lastOpenedAt: serverTimestamp(),
-        });
+        await Promise.all(
+          createDefaultRecords().map((record) =>
+            setDoc(doc(firebase.db, 'users', user.uid, 'quizzes', record.id), {
+              ...record,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+              lastOpenedAt: serverTimestamp(),
+            }),
+          ),
+        );
         return;
       }
       setRecords(snapshot.docs.map((item) => {
@@ -310,7 +369,7 @@ export default function Home() {
           .toLowerCase()
           .includes(text);
       })
-      .sort((a, b) => new Date(b.lastOpenedAt || b.updatedAt).getTime() - new Date(a.lastOpenedAt || a.updatedAt).getTime());
+      .sort(compareQuizRecords);
   }, [records, search]);
 
   async function persistRecord(nextRecord: QuizRecord) {
