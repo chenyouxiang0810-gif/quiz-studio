@@ -95,6 +95,12 @@ function createDefaultRecords(): QuizRecord[] {
   return defaultQuizzes.map((quiz, index) => createDefaultRecord(quiz, index)).sort(compareQuizRecords);
 }
 
+function mergeDefaultRecords(records: QuizRecord[]): QuizRecord[] {
+  const existingTitles = new Set(records.map((record) => record.quiz.title.trim()));
+  const missingDefaults = createDefaultRecords().filter((record) => !existingTitles.has(record.quiz.title.trim()));
+  return [...records, ...missingDefaults].sort(compareQuizRecords);
+}
+
 function createInitialProgress(quiz: QuizDocument): QuizProgress {
   return {
     lastSectionId: quiz.sections[0]?.id,
@@ -175,8 +181,9 @@ function loadLocalRecords(): QuizRecord[] {
     }
     backupLocalPayload(saved, 'before-progress-migration');
     const migrated = parsed.map(normalizeRecord);
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
-    return migrated;
+    const withDefaults = mergeDefaultRecords(migrated);
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(withDefaults));
+    return withDefaults;
   } catch {
     backupLocalPayload(saved, 'unreadable-records');
     return createDefaultRecords();
@@ -333,7 +340,7 @@ export default function Home() {
         );
         return;
       }
-      setRecords(snapshot.docs.map((item) => {
+      const cloudRecords = snapshot.docs.map((item) => {
         const data = item.data();
         return normalizeRecord({
           id: item.id,
@@ -343,7 +350,23 @@ export default function Home() {
           lastOpenedAt: normalizeDate(data.lastOpenedAt),
           progress: (data.progress as QuizProgress) ?? { answers: {}, checkedSections: {} },
         });
-      }));
+      });
+      const withDefaults = mergeDefaultRecords(cloudRecords);
+      const existingTitles = new Set(cloudRecords.map((record) => record.quiz.title.trim()));
+      const missingDefaults = withDefaults.filter((record) => !existingTitles.has(record.quiz.title.trim()));
+      if (missingDefaults.length) {
+        await Promise.all(
+          missingDefaults.map((record) =>
+            setDoc(doc(firebase.db, 'users', user.uid, 'quizzes', record.id), {
+              ...record,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+              lastOpenedAt: serverTimestamp(),
+            }),
+          ),
+        );
+      }
+      setRecords(withDefaults);
       setLoading(false);
     }, () => setLoading(false));
     return () => {
