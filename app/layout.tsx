@@ -7,7 +7,7 @@ const geistMono = Geist_Mono({ variable: '--font-geist-mono', subsets: ['latin']
 
 export const metadata: Metadata = {
   title: 'Quiz Studio',
-  description: 'Google 登入、雲端保存、可朗讀成語的分段 Quiz 製作網站。',
+  description: '本機儲存、可朗讀成語與意思的分段 Quiz 製作網站。',
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

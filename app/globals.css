@@ -49,7 +49,8 @@ button:disabled {
 .dark-button,
 .primary-cta,
 .open-button,
-.icon-button {
+.icon-button,
+.voice-picker {
   align-items: center;
   display: inline-flex;
   gap: 0.5rem;
@@ -388,6 +389,32 @@ button:disabled {
   background: white;
   box-shadow: 0 10px 26px rgb(24 24 27 / 10%);
   color: #0b0b0d;
+}
+
+.voice-picker {
+  background: rgb(255 255 255 / 74%);
+  border: 1px solid rgb(24 24 27 / 9%);
+  border-radius: 999px;
+  color: #18181b;
+  max-width: min(100%, 19rem);
+  min-height: 2.7rem;
+  padding: 0.25rem 0.45rem 0.25rem 0.85rem;
+  backdrop-filter: blur(18px);
+}
+
+.voice-picker select {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: #18181b;
+  cursor: pointer;
+  font-size: 0.86rem;
+  font-weight: 650;
+  max-width: 15.5rem;
+  min-height: 2.1rem;
+  outline: 0;
+  padding-right: 0.35rem;
+  text-overflow: ellipsis;
 }
 
 .term-grid {

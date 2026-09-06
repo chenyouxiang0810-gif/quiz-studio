@@ -1,39 +1,14 @@
 'use client';
 
-import { initializeApp, type FirebaseApp } from 'firebase/app';
-import {
-  GoogleAuthProvider,
-  getAuth,
-  onAuthStateChanged,
-  signInWithPopup,
-  signOut,
-  type User,
-} from 'firebase/auth';
-import {
-  collection,
-  deleteDoc,
-  doc,
-  getFirestore,
-  onSnapshot,
-  orderBy,
-  query,
-  serverTimestamp,
-  setDoc,
-  updateDoc,
-  type Firestore,
-} from 'firebase/firestore';
 import {
   BookOpen,
   Check,
   ChevronLeft,
   ChevronRight,
   Clock3,
-  Cloud,
   FileJson,
   Headphones,
   Home as HomeIcon,
-  LogIn,
-  LogOut,
   Plus,
   RefreshCw,
   Search,
@@ -41,34 +16,112 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { defaultQuizzes } from '../lib/defaultQuizzes';
 import { buildSpeakText, normalizeQuiz } from '../lib/quizSchema';
-import { sampleQuiz } from '../lib/sampleQuiz';
 import type { ChoiceId, QuizDocument, QuizProgress, QuizQuestion, QuizRecord, QuizSection, StudyItem } from '../lib/quizTypes';
-
-type FirebaseBundle = { app: FirebaseApp; db: Firestore; auth: ReturnType<typeof getAuth> };
 
 const STORAGE_KEY = 'quiz-studio.records.v1';
 const BACKUP_STORAGE_KEY = 'quiz-studio.records.backup.v1';
-const firebaseConfig = {
-  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
-  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
-  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
-  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
-};
-const firebaseReady = Boolean(firebaseConfig.apiKey && firebaseConfig.authDomain && firebaseConfig.projectId && firebaseConfig.appId);
-let firebaseBundle: FirebaseBundle | null = null;
+const VOICE_KEY = 'quiz-studio.voice-uri.v1';
 
-function getFirebase(): FirebaseBundle | null {
-  if (!firebaseReady) return null;
-  if (firebaseBundle) return firebaseBundle;
-  const app = initializeApp(firebaseConfig);
-  firebaseBundle = { app, auth: getAuth(app), db: getFirestore(app) };
-  return firebaseBundle;
+const GPT_QUIZ_PROMPT = `請依照以下規格，幫我把教材整理成 Quiz Studio 可以直接匯入的 JSON。只輸出 JSON，不要加 Markdown 程式碼框，不要加解釋文字。
+
+用途：
+這是一個國文成語分段朗讀選擇題網站。每一課可以有多個 Part。每個 Part 先放教材成語，網站只會朗讀成語教材，不朗讀選擇題；之後同一個 Part 一次顯示整組選擇題。
+
+最外層格式：
+{
+  "schemaVersion": "quiz-json-v1",
+  "title": "第幾課 課名：成語分段朗讀選擇題",
+  "category": "國文成語",
+  "locale": "zh-TW",
+  "description": "每個 Part 先讀成語教材，播放按鈕會朗讀「成語，意思：內容」，接著一次完成同一 Part 的選擇題。",
+  "createdBy": "ChatGPT",
+  "sections": []
 }
+
+sections 規則：
+1. 每個 Part 放一個 section。
+2. section 必須有 id、title、subtitle、order、studyItems、questions。
+3. title 格式建議為：STEP 1 與「星」有關的成語。
+4. order 用 1、2、3 依序編號。
+
+studyItems 規則：
+1. 每個成語或詞語放一筆 studyItem。
+2. 必填欄位：id、type、term、speakText、meaning。
+3. type 可用 "idiom"、"vocabulary" 或 "term"。
+4. term 是畫面上看到的成語。
+5. speakText 是播放時朗讀的成語本身，通常和 term 相同。
+6. meaning 必填，而且要放意思。朗讀時網站會念：「成語，意思：meaning」。
+7. reading 放注音或讀音，例如「熠，音ㄧˋ」。
+8. detail 放補充詳解。
+9. notes 可放補充筆記陣列。
+
+questions 規則：
+1. 每題都是 multipleChoice。
+2. 必填欄位：id、type、prompt、choices、correctChoiceId、explanation、relatedItemIds。
+3. prompt 是題目敘述。
+4. choices 必須是 A、B、C、D 四個選項，每個選項格式為 {"id":"A","text":"選項文字"}。
+5. correctChoiceId 填 "A"、"B"、"C" 或 "D"。
+6. explanation 寫完整詳解，例如「答案是 B：星光熠熠。因為它形容星光耀眼。」
+7. relatedItemIds 必須填這題對應的 studyItem id，答錯時網站會在該成語旁標記不熟悉。
+
+重要限制：
+1. id 只能用英文、數字、連字號，例如 star-01、star-q01。
+2. JSON 必須合法，不能有註解、不能有多餘逗號。
+3. 不要把答案寫在 prompt 裡。
+4. 每個 Part 的 questions 要一次列完整，不要分批。
+5. 題目選項要打亂，正確答案不要固定都同一個。
+6. 如果教材有 STEP 1、STEP 2、STEP 3，就建立三個 sections。
+7. 請保留教材中的讀音、意思、補充說明。
+
+請依照這個範例結構輸出：
+{
+  "schemaVersion": "quiz-json-v1",
+  "title": "第一課 夏夜：成語分段朗讀選擇題",
+  "category": "國文成語",
+  "locale": "zh-TW",
+  "description": "每個 Part 先讀成語教材，播放按鈕會朗讀「成語，意思：內容」，接著一次完成同一 Part 的選擇題。",
+  "createdBy": "ChatGPT",
+  "sections": [
+    {
+      "id": "step-1-star",
+      "title": "STEP 1 與「星」有關的成語",
+      "subtitle": "12 個星字相關成語",
+      "order": 1,
+      "studyItems": [
+        {
+          "id": "star-01",
+          "type": "idiom",
+          "term": "星光熠熠",
+          "speakText": "星光熠熠",
+          "reading": "熠，音ㄧˋ",
+          "meaning": "形容星光耀眼。",
+          "detail": "熠，光耀、明亮。"
+        }
+      ],
+      "questions": [
+        {
+          "id": "star-q01",
+          "type": "multipleChoice",
+          "prompt": "形容星光耀眼。",
+          "choices": [
+            {"id": "A", "text": "星月交輝"},
+            {"id": "B", "text": "星光熠熠"},
+            {"id": "C", "text": "月明星稀"},
+            {"id": "D", "text": "眾星拱月"}
+          ],
+          "correctChoiceId": "B",
+          "explanation": "答案是 B：星光熠熠。因為它形容星光耀眼。",
+          "relatedItemIds": ["star-01"]
+        }
+      ]
+    }
+  ]
+}
+
+現在請把我接下來提供的教材完整轉成這個 JSON。`;
 
 function createRecord(quiz: QuizDocument): QuizRecord {
   const now = new Date().toISOString();
@@ -190,13 +243,6 @@ function loadLocalRecords(): QuizRecord[] {
   }
 }
 
-function normalizeDate(value: unknown): string {
-  if (!value) return new Date().toISOString();
-  if (typeof value === 'string') return value;
-  if (typeof value === 'object' && 'toDate' in value && typeof value.toDate === 'function') return value.toDate().toISOString();
-  return new Date().toISOString();
-}
-
 const questionCount = (quiz: QuizDocument) => quiz.sections.reduce((sum, section) => sum + section.questions.length, 0);
 const answeredCount = (record: QuizRecord) => Object.keys(record.progress.answers || {}).length;
 const saveLocal = (records: QuizRecord[]) => window.localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
@@ -243,6 +289,25 @@ function compareQuizRecords(a: QuizRecord, b: QuizRecord) {
   if (lessonA !== null && lessonB === null) return -1;
   if (lessonA === null && lessonB !== null) return 1;
   return a.quiz.title.localeCompare(b.quiz.title, 'zh-Hant');
+}
+
+function sortedChineseVoices(voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice[] {
+  const zhVoices = voices.filter((voice) => /zh|Chinese|Mandarin|Taiwan|Hong Kong|China|Mei-Jia|Ting-Ting|Sin-ji/i.test(`${voice.lang} ${voice.name}`));
+  return zhVoices.sort((a, b) => voiceRank(a) - voiceRank(b) || a.name.localeCompare(b.name, 'zh-Hant'));
+}
+
+function voiceRank(voice: SpeechSynthesisVoice) {
+  const label = `${voice.lang} ${voice.name}`.toLowerCase();
+  if (label.includes('zh-tw') || label.includes('taiwan') || label.includes('mei-jia')) return 0;
+  if (label.includes('zh-hk') || label.includes('hong kong') || label.includes('sin-ji')) return 1;
+  if (label.includes('zh-cn') || label.includes('china') || label.includes('ting-ting')) return 2;
+  if (label.includes('zh')) return 3;
+  return 4;
+}
+
+function voiceLabel(voice: SpeechSynthesisVoice) {
+  const region = voice.lang === 'zh-TW' ? '台灣國語' : voice.lang === 'zh-HK' ? '香港中文' : voice.lang === 'zh-CN' ? '普通話' : voice.lang;
+  return `${voice.name} · ${region}`;
 }
 
 function orderedQuestions(section: QuizSection, progress: QuizProgress): QuizQuestion[] {
@@ -292,7 +357,6 @@ function unfamiliarItemCounts(section: QuizSection, progress: QuizProgress): Rec
 
 export default function Home() {
   const [records, setRecords] = useState<QuizRecord[]>([]);
-  const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [sectionIndex, setSectionIndex] = useState(0);
@@ -302,84 +366,30 @@ export default function Home() {
   const [importText, setImportText] = useState('');
   const [importError, setImportError] = useState('');
   const [toast, setToast] = useState('');
-  const unsubscribeRef = useRef<(() => void) | null>(null);
-  const firebase = useMemo(() => getFirebase(), []);
-  const cloudMode = Boolean(firebase && user);
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [selectedVoiceURI, setSelectedVoiceURI] = useState(() => (typeof window === 'undefined' ? '' : window.localStorage.getItem(VOICE_KEY) || ''));
   const selectedRecord = records.find((record) => record.id === selectedId) ?? null;
 
   useEffect(() => {
-    if (!firebase) {
-      queueMicrotask(() => {
-        setRecords(loadLocalRecords());
-        setLoading(false);
-      });
-      return;
-    }
-    return onAuthStateChanged(firebase.auth, (nextUser) => {
-      setUser(nextUser);
+    queueMicrotask(() => {
+      setRecords(loadLocalRecords());
       setLoading(false);
     });
-  }, [firebase]);
-
-  useEffect(() => {
-    unsubscribeRef.current?.();
-    unsubscribeRef.current = null;
-    if (!firebase || !user) return;
-    const q = query(collection(firebase.db, 'users', user.uid, 'quizzes'), orderBy('updatedAt', 'desc'));
-    unsubscribeRef.current = onSnapshot(q, async (snapshot) => {
-      if (snapshot.empty) {
-        await Promise.all(
-          createDefaultRecords().map((record) =>
-            setDoc(doc(firebase.db, 'users', user.uid, 'quizzes', record.id), {
-              ...record,
-              createdAt: serverTimestamp(),
-              updatedAt: serverTimestamp(),
-              lastOpenedAt: serverTimestamp(),
-            }),
-          ),
-        );
-        return;
-      }
-      const cloudRecords = snapshot.docs.map((item) => {
-        const data = item.data();
-        return normalizeRecord({
-          id: item.id,
-          quiz: data.quiz as QuizDocument,
-          createdAt: normalizeDate(data.createdAt),
-          updatedAt: normalizeDate(data.updatedAt),
-          lastOpenedAt: normalizeDate(data.lastOpenedAt),
-          progress: (data.progress as QuizProgress) ?? { answers: {}, checkedSections: {} },
-        });
-      });
-      const withDefaults = mergeDefaultRecords(cloudRecords);
-      const existingTitles = new Set(cloudRecords.map((record) => record.quiz.title.trim()));
-      const missingDefaults = withDefaults.filter((record) => !existingTitles.has(record.quiz.title.trim()));
-      if (missingDefaults.length) {
-        await Promise.all(
-          missingDefaults.map((record) =>
-            setDoc(doc(firebase.db, 'users', user.uid, 'quizzes', record.id), {
-              ...record,
-              createdAt: serverTimestamp(),
-              updatedAt: serverTimestamp(),
-              lastOpenedAt: serverTimestamp(),
-            }),
-          ),
-        );
-      }
-      setRecords(withDefaults);
-      setLoading(false);
-    }, () => setLoading(false));
-    return () => {
-      unsubscribeRef.current?.();
-      unsubscribeRef.current = null;
-    };
-  }, [firebase, user]);
+  }, []);
 
   useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(''), 2600);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  useEffect(() => {
+    if (!window.speechSynthesis) return;
+    const updateVoices = () => setVoices(sortedChineseVoices(window.speechSynthesis.getVoices()));
+    updateVoices();
+    window.speechSynthesis.addEventListener('voiceschanged', updateVoices);
+    return () => window.speechSynthesis.removeEventListener('voiceschanged', updateVoices);
+  }, []);
 
   const filteredRecords = useMemo(() => {
     const text = search.trim().toLowerCase();
@@ -398,31 +408,14 @@ export default function Home() {
   async function persistRecord(nextRecord: QuizRecord) {
     const nextRecords = records.map((record) => (record.id === nextRecord.id ? nextRecord : record));
     setRecords(nextRecords);
-    if (cloudMode && firebase && user) {
-      await updateDoc(doc(firebase.db, 'users', user.uid, 'quizzes', nextRecord.id), {
-        progress: nextRecord.progress,
-        updatedAt: serverTimestamp(),
-        lastOpenedAt: serverTimestamp(),
-      });
-    } else {
-      saveLocal(nextRecords);
-    }
+    saveLocal(nextRecords);
   }
 
   async function addQuiz(quiz: QuizDocument) {
     const record = createRecord(quiz);
-    if (cloudMode && firebase && user) {
-      await setDoc(doc(firebase.db, 'users', user.uid, 'quizzes', record.id), {
-        ...record,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-        lastOpenedAt: serverTimestamp(),
-      });
-    } else {
-      const nextRecords = [record, ...records];
-      setRecords(nextRecords);
-      saveLocal(nextRecords);
-    }
+    const nextRecords = [...records, record].sort(compareQuizRecords);
+    setRecords(nextRecords);
+    saveLocal(nextRecords);
     setSelectedId(record.id);
     setSectionIndex(0);
     setMode('study');
@@ -433,8 +426,7 @@ export default function Home() {
     const nextRecords = records.filter((record) => record.id !== recordId);
     setRecords(nextRecords);
     if (selectedId === recordId) setSelectedId(null);
-    if (cloudMode && firebase && user) await deleteDoc(doc(firebase.db, 'users', user.uid, 'quizzes', recordId));
-    else saveLocal(nextRecords);
+    saveLocal(nextRecords);
   }
 
   async function openQuiz(record: QuizRecord) {
@@ -443,14 +435,6 @@ export default function Home() {
     setSectionIndex(lastIndex);
     setMode('study');
     await persistRecord({ ...record, lastOpenedAt: new Date().toISOString() });
-  }
-
-  async function signIn() {
-    if (!firebase) {
-      setToast('請先填入 Firebase 設定，才會啟用 Google 登入');
-      return;
-    }
-    await signInWithPopup(firebase.auth, new GoogleAuthProvider());
   }
 
   async function submitImport() {
@@ -468,9 +452,16 @@ export default function Home() {
     if (!window.speechSynthesis) return;
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(buildSpeakText(item));
-    utterance.lang = locale;
+    const selectedVoice = voices.find((voice) => voice.voiceURI === selectedVoiceURI);
+    if (selectedVoice) utterance.voice = selectedVoice;
+    utterance.lang = selectedVoice?.lang || locale;
     utterance.rate = 0.86;
     window.speechSynthesis.speak(utterance);
+  }
+
+  function chooseVoice(voiceURI: string) {
+    setSelectedVoiceURI(voiceURI);
+    window.localStorage.setItem(VOICE_KEY, voiceURI);
   }
 
   async function chooseAnswer(questionId: string, choiceId: ChoiceId) {
@@ -559,6 +550,9 @@ export default function Home() {
         onCheck={checkSection}
         onResetSection={resetSection}
         onMoveSection={moveSection}
+        voices={voices}
+        selectedVoiceURI={selectedVoiceURI}
+        onVoice={chooseVoice}
       />
     );
   }
@@ -579,21 +573,6 @@ export default function Home() {
             <BookOpen className="h-5 w-5" />
             <span>Quiz Studio</span>
           </button>
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="status-pill">
-              <Cloud className="h-4 w-4" />
-              {cloudMode ? 'Google 雲端同步' : firebaseReady ? '等待 Google 登入' : '本機 Demo 模式'}
-            </span>
-            {firebaseReady && user ? (
-              <button className="quiet-button" type="button" onClick={() => signOut(firebase!.auth)}>
-                <LogOut className="h-4 w-4" />登出
-              </button>
-            ) : (
-              <button className={firebaseReady ? 'dark-button' : 'quiet-button'} type="button" onClick={signIn}>
-                <LogIn className="h-4 w-4" />{firebaseReady ? '使用 Google 登入' : '啟用登入'}
-              </button>
-            )}
-          </div>
         </header>
 
         <section className="hero-shell mb-7">
@@ -620,16 +599,6 @@ export default function Home() {
           <MetricCard label="已作答 / 題目" value={`${totalAnswered} / ${totalQuestions}`} />
         </section>
 
-        {!firebaseReady && (
-          <section className="setup-note mb-6">
-            <Cloud className="h-5 w-5" />
-            <div>
-              <strong>目前使用本機 Demo 儲存。</strong>
-              <span>填入 Firebase 設定後，Google 登入與 Firestore 跨裝置同步會自動啟用。</span>
-            </div>
-          </section>
-        )}
-
         <section className="grid gap-4 pb-12 sm:grid-cols-2 xl:grid-cols-3">
           {filteredRecords.map((record) => (
             <QuizCard key={record.id} record={record} onOpen={() => openQuiz(record)} onDelete={() => deleteQuiz(record.id)} />
@@ -654,7 +623,10 @@ export default function Home() {
             setShowImport(false);
             setImportError('');
           }}
-          onUseSample={() => setImportText(JSON.stringify(sampleQuiz, null, 2))}
+          onUsePrompt={() => {
+            setImportText(GPT_QUIZ_PROMPT);
+            setToast('GPT 指令已放入文字框');
+          }}
           onSubmit={submitImport}
         />
       )}
@@ -734,6 +706,9 @@ function QuizPlayer({
   onCheck,
   onResetSection,
   onMoveSection,
+  voices,
+  selectedVoiceURI,
+  onVoice,
 }: {
   record: QuizRecord;
   sectionIndex: number;
@@ -745,6 +720,9 @@ function QuizPlayer({
   onCheck: () => void;
   onResetSection: () => void;
   onMoveSection: (index: number) => void;
+  voices: SpeechSynthesisVoice[];
+  selectedVoiceURI: string;
+  onVoice: (voiceURI: string) => void;
 }) {
   const section = record.quiz.sections[sectionIndex];
   const checked = Boolean(record.progress.checkedSections?.[section.id]);
@@ -809,7 +787,20 @@ function QuizPlayer({
                       本 Part 共 {section.questions.length} 題，錯 {wrong} 題。每個播放鍵會念「成語，意思：內容」，不會朗讀選擇題。
                     </p>
                   </div>
-                  <button className="dark-button" type="button" onClick={() => onMode('quiz')}>開始本 Part 題目<ChevronRight className="h-4 w-4" /></button>
+                  <div className="flex flex-col gap-2 sm:items-end">
+                    <label className="voice-picker">
+                      <Headphones className="h-4 w-4" />
+                      <select value={selectedVoiceURI} onChange={(event) => onVoice(event.target.value)} aria-label="朗讀語音">
+                        <option value="">系統預設中文語音</option>
+                        {voices.map((voice) => (
+                          <option key={voice.voiceURI} value={voice.voiceURI}>
+                            {voiceLabel(voice)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <button className="dark-button" type="button" onClick={() => onMode('quiz')}>開始本 Part 題目<ChevronRight className="h-4 w-4" /></button>
+                  </div>
                 </div>
               </div>
               <div className="term-grid">
@@ -907,14 +898,14 @@ function ImportModal({
   error,
   onChange,
   onClose,
-  onUseSample,
+  onUsePrompt,
   onSubmit,
 }: {
   value: string;
   error: string;
   onChange: (value: string) => void;
   onClose: () => void;
-  onUseSample: () => void;
+  onUsePrompt: () => void;
   onSubmit: () => void;
 }) {
   return (
@@ -924,7 +915,7 @@ function ImportModal({
           <div>
             <p className="eyebrow">新增 Quiz</p>
             <h2 className="mt-2 text-3xl font-semibold tracking-normal">貼上固定 JSON</h2>
-            <p className="mt-2 text-sm leading-6 text-zinc-500">JSON 需包含標題、Part、成語教材與題目；成語必須填 meaning。也可使用 parts、terms、options、correctAnswer。</p>
+            <p className="mt-2 text-sm leading-6 text-zinc-500">先用 GPT 指令產生 JSON，再貼回這裡建立 Quiz。成語必須填 meaning，朗讀時會一起念意思。</p>
           </div>
           <button className="icon-button" type="button" aria-label="關閉" onClick={onClose}><X className="h-4 w-4" /></button>
         </div>
@@ -934,7 +925,7 @@ function ImportModal({
         <textarea value={value} onChange={(event) => onChange(event.target.value)} spellCheck={false} placeholder="把 ChatGPT 產生的 quiz-json-v1 貼在這裡" />
         {error && <p className="mt-3 rounded-2xl bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p>}
         <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:justify-between">
-          <button className="quiet-button" type="button" onClick={onUseSample}><FileJson className="h-4 w-4" />放入範例 JSON</button>
+          <button className="quiet-button" type="button" onClick={onUsePrompt}><Sparkles className="h-4 w-4" />GPT 指令</button>
           <button className="dark-button" type="button" onClick={onSubmit}><Plus className="h-4 w-4" />建立 Quiz</button>
         </div>
       </section>

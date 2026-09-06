@@ -1,45 +1,24 @@
 # Quiz Studio
 
-一個 Apple 風格的分段朗讀 Quiz 網站。使用者可用 Google 帳號登入，透過 Firebase Auth + Firestore 保存自己建立過的 Quiz，並跨裝置同步。
+一個 Apple 風格的分段朗讀 Quiz 網站。固定使用本機儲存保存 Quiz 與作答進度。
 
 ## 功能
 
-- Google 登入
-- Firestore 雲端保存每位使用者的 Quiz 與作答進度
-- 主畫面方格卡片、搜尋、最近使用排序
+- 固定本機 Demo 儲存
+- 主畫面方格卡片、搜尋、依「第幾課」排序
 - 新增 Quiz：貼上固定 `quiz-json-v1` JSON 一次建立完整份
+- 新增 Quiz 視窗提供「GPT 指令」，可請 ChatGPT 產生正確格式 JSON
 - 每個 Part 先顯示成語/詞語教材
 - 每個成語旁播放鍵朗讀 `speakText` 或 `term`，再加上 `meaning`
+- 教材頁可選擇瀏覽器提供的中文語音
 - 同一 Part 一次顯示整組選擇題
 - 點選答案、批改、詳解、重做、Part 切換
-- 未設定 Firebase 時可用本機 Demo 模式測試
 
 ## 本機開發
 
 ```bash
 npm install
 npm run dev
-```
-
-## 啟用 Google 登入與雲端保存
-
-1. 到 Firebase 建立專案。
-2. 啟用 Authentication，登入方式選 Google。
-3. 建立 Firestore Database。
-4. 複製 `.env.example` 成 `.env.local`，填入 Firebase Web App 設定。
-5. 重新啟動開發伺服器。
-
-Firestore 建議規則：
-
-```txt
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    match /users/{userId}/quizzes/{quizId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
-    }
-  }
-}
 ```
 
 ## JSON Schema 摘要
@@ -88,4 +67,4 @@ service cloud.firestore {
 }
 ```
 
-完整範例資料已內建在首頁的「放入範例 JSON」按鈕中，也另存於 `public/demo-idiom-quiz.json`。
+完整 GPT 產生指令已內建在新增 Quiz 視窗的「GPT 指令」按鈕中；預設 10 課題庫內建於 `lib/defaultQuizzes.json`。
