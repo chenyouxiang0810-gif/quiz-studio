@@ -24,6 +24,7 @@ import type { ChoiceId, QuizDocument, QuizProgress, QuizQuestion, QuizRecord, Qu
 const STORAGE_KEY = 'quiz-studio.records.v1';
 const BACKUP_STORAGE_KEY = 'quiz-studio.records.backup.v1';
 const VOICE_KEY = 'quiz-studio.voice-uri.v1';
+const DEFAULT_QUIZ_TITLES = new Set(defaultQuizzes.map((quiz) => quiz.title.trim()));
 
 const GPT_QUIZ_PROMPT = `請依照以下規格，幫我把教材整理成 Quiz Studio 可以直接匯入的 JSON。只輸出 JSON，不要加 Markdown 程式碼框，不要加解釋文字。
 
@@ -291,6 +292,10 @@ function compareQuizRecords(a: QuizRecord, b: QuizRecord) {
   return a.quiz.title.localeCompare(b.quiz.title, 'zh-Hant');
 }
 
+function isDefaultQuizRecord(record: QuizRecord) {
+  return record.id.startsWith('default-lesson-') || DEFAULT_QUIZ_TITLES.has(record.quiz.title.trim());
+}
+
 function sortedChineseVoices(voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice[] {
   const zhVoices = voices.filter((voice) => /zh|Chinese|Mandarin|Taiwan|Hong Kong|China|Mei-Jia|Ting-Ting|Sin-ji/i.test(`${voice.lang} ${voice.name}`));
   return zhVoices.sort((a, b) => voiceRank(a) - voiceRank(b) || a.name.localeCompare(b.name, 'zh-Hant'));
@@ -423,6 +428,11 @@ export default function Home() {
   }
 
   async function deleteQuiz(recordId: string) {
+    const target = records.find((record) => record.id === recordId);
+    if (target && isDefaultQuizRecord(target)) {
+      setToast('Main 預設題庫不能刪除');
+      return;
+    }
     const nextRecords = records.filter((record) => record.id !== recordId);
     setRecords(nextRecords);
     if (selectedId === recordId) setSelectedId(null);
@@ -559,6 +569,8 @@ export default function Home() {
 
   const totalQuestions = records.reduce((sum, record) => sum + questionCount(record.quiz), 0);
   const totalAnswered = records.reduce((sum, record) => sum + answeredCount(record), 0);
+  const mainRecords = filteredRecords.filter(isDefaultQuizRecord);
+  const myRecords = filteredRecords.filter((record) => !isDefaultQuizRecord(record));
 
   return (
     <main className="min-h-screen overflow-hidden bg-[#f6f6f3] text-zinc-950">
@@ -595,15 +607,27 @@ export default function Home() {
             <Search className="h-5 w-5 text-zinc-400" />
             <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜尋標題、分類或 Part" />
           </label>
-          <MetricCard label="Quiz" value={records.length} />
+          <MetricCard label="Main / My Quiz" value={`${records.filter(isDefaultQuizRecord).length} / ${records.filter((record) => !isDefaultQuizRecord(record)).length}`} />
           <MetricCard label="已作答 / 題目" value={`${totalAnswered} / ${totalQuestions}`} />
         </section>
 
-        <section className="grid gap-4 pb-12 sm:grid-cols-2 xl:grid-cols-3">
-          {filteredRecords.map((record) => (
-            <QuizCard key={record.id} record={record} onOpen={() => openQuiz(record)} onDelete={() => deleteQuiz(record.id)} />
-          ))}
-        </section>
+        <QuizShelf
+          title="Main"
+          description="預設課程會一直保留，不能刪除。"
+          records={mainRecords}
+          onOpen={openQuiz}
+          onDelete={deleteQuiz}
+          locked
+        />
+
+        <QuizShelf
+          title="My Quiz"
+          description="你新增的 JSON Quiz 會放在這裡。"
+          records={myRecords}
+          onOpen={openQuiz}
+          onDelete={deleteQuiz}
+          emptyText={search.trim() ? 'My Quiz 沒有符合搜尋的題庫。' : '還沒有自己新增的 Quiz。'}
+        />
 
         {filteredRecords.length === 0 && (
           <section className="glass-panel mx-auto mt-8 max-w-lg p-8 text-center">
@@ -644,7 +668,65 @@ function MetricCard({ label, value }: { label: string; value: number | string })
   );
 }
 
-function QuizCard({ record, onOpen, onDelete }: { record: QuizRecord; onOpen: () => void; onDelete: () => void }) {
+function QuizShelf({
+  title,
+  description,
+  records,
+  onOpen,
+  onDelete,
+  locked = false,
+  emptyText,
+}: {
+  title: string;
+  description: string;
+  records: QuizRecord[];
+  onOpen: (record: QuizRecord) => void;
+  onDelete: (recordId: string) => void;
+  locked?: boolean;
+  emptyText?: string;
+}) {
+  if (!records.length) {
+    return (
+      <section className="quiz-shelf">
+        <div className="shelf-heading">
+          <div>
+            <p className="eyebrow">{title}</p>
+            <h2>{title}</h2>
+            <span>{description}</span>
+          </div>
+          <strong>0</strong>
+        </div>
+        {emptyText && <div className="empty-shelf">{emptyText}</div>}
+      </section>
+    );
+  }
+
+  return (
+    <section className="quiz-shelf">
+      <div className="shelf-heading">
+        <div>
+          <p className="eyebrow">{title}</p>
+          <h2>{title}</h2>
+          <span>{description}</span>
+        </div>
+        <strong>{records.length}</strong>
+      </div>
+      <div className="quiz-grid">
+        {records.map((record) => (
+          <QuizCard
+            key={record.id}
+            record={record}
+            locked={locked}
+            onOpen={() => onOpen(record)}
+            onDelete={() => onDelete(record.id)}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function QuizCard({ record, onOpen, onDelete, locked = false }: { record: QuizRecord; onOpen: () => void; onDelete: () => void; locked?: boolean }) {
   const total = questionCount(record.quiz);
   const terms = record.quiz.sections.reduce((sum, section) => sum + section.studyItems.length, 0);
   const progress = total ? Math.round((answeredCount(record) / total) * 100) : 0;
@@ -655,9 +737,13 @@ function QuizCard({ record, onOpen, onDelete }: { record: QuizRecord; onOpen: ()
           <span className="category-pill">{record.quiz.category || '未分類'}</span>
           <h2 className="mt-4 line-clamp-2 text-2xl font-semibold tracking-normal">{record.quiz.title}</h2>
         </div>
-        <button className="icon-button danger" type="button" aria-label="刪除 Quiz" onClick={onDelete}>
-          <Trash2 className="h-4 w-4" />
-        </button>
+        {locked ? (
+          <span className="locked-pill">Main</span>
+        ) : (
+          <button className="icon-button danger" type="button" aria-label="刪除 Quiz" onClick={onDelete}>
+            <Trash2 className="h-4 w-4" />
+          </button>
+        )}
       </div>
       <p className="line-clamp-2 min-h-12 text-sm leading-6 text-zinc-500">{record.quiz.description || '這份 Quiz 尚未加入描述。'}</p>
       <div className="mt-6 grid grid-cols-3 gap-2">
