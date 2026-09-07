@@ -315,6 +315,14 @@ function voiceLabel(voice: SpeechSynthesisVoice) {
   return `${voice.name} · ${region}`;
 }
 
+function pickSpeechVoice(voices: SpeechSynthesisVoice[], selectedVoiceURI: string, locale: string) {
+  const selected = voices.find((voice) => voice.voiceURI === selectedVoiceURI);
+  if (selected) return selected;
+  const localeVoice = voices.find((voice) => voice.lang === locale);
+  if (localeVoice) return localeVoice;
+  return voices[0];
+}
+
 function orderedQuestions(section: QuizSection, progress: QuizProgress): QuizQuestion[] {
   const byId = new Map(section.questions.map((question) => [question.id, question]));
   const savedOrder = progress.questionOrderBySection?.[section.id] || [];
@@ -459,14 +467,42 @@ export default function Home() {
   }
 
   function speak(item: StudyItem, locale = 'zh-TW') {
-    if (!window.speechSynthesis) return;
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(buildSpeakText(item));
-    const selectedVoice = voices.find((voice) => voice.voiceURI === selectedVoiceURI);
-    if (selectedVoice) utterance.voice = selectedVoice;
-    utterance.lang = selectedVoice?.lang || locale;
-    utterance.rate = 0.86;
-    window.speechSynthesis.speak(utterance);
+    const synth = window.speechSynthesis;
+    if (!synth) {
+      setToast('這個瀏覽器不支援朗讀');
+      return;
+    }
+    const currentVoices = sortedChineseVoices(synth.getVoices());
+    if (currentVoices.length) setVoices(currentVoices);
+    const text = buildSpeakText(item);
+    const preferredVoice = pickSpeechVoice(currentVoices.length ? currentVoices : voices, selectedVoiceURI, locale);
+
+    const play = (voice?: SpeechSynthesisVoice) => {
+      const utterance = new SpeechSynthesisUtterance(text);
+      if (voice) utterance.voice = voice;
+      utterance.lang = voice?.lang || locale || 'zh-TW';
+      utterance.rate = 0.82;
+      utterance.pitch = 1;
+      utterance.onerror = () => {
+        if (voice) {
+          synth.cancel();
+          const fallback = new SpeechSynthesisUtterance(text);
+          fallback.lang = locale || 'zh-TW';
+          fallback.rate = 0.82;
+          fallback.pitch = 1;
+          synth.speak(fallback);
+          synth.resume();
+          setToast('已改用系統中文語音');
+        } else {
+          setToast('朗讀失敗，請確認裝置不是靜音模式');
+        }
+      };
+      synth.cancel();
+      synth.speak(utterance);
+      synth.resume();
+    };
+
+    play(preferredVoice);
   }
 
   function chooseVoice(voiceURI: string) {
@@ -820,6 +856,7 @@ function QuizPlayer({
   const allAnswered = answered === section.questions.length;
   const total = questionCount(record.quiz);
   const totalDone = answeredCount(record);
+  const voiceSelectValue = voices.some((voice) => voice.voiceURI === selectedVoiceURI) ? selectedVoiceURI : '';
 
   return (
     <main className="min-h-screen bg-[#f6f6f3] text-zinc-950">
@@ -876,8 +913,8 @@ function QuizPlayer({
                   <div className="flex flex-col gap-2 sm:items-end">
                     <label className="voice-picker">
                       <Headphones className="h-4 w-4" />
-                      <select value={selectedVoiceURI} onChange={(event) => onVoice(event.target.value)} aria-label="朗讀語音">
-                        <option value="">系統預設中文語音</option>
+                      <select value={voiceSelectValue} onChange={(event) => onVoice(event.target.value)} aria-label="朗讀語音">
+                        <option value="">自動中文語音</option>
                         {voices.map((voice) => (
                           <option key={voice.voiceURI} value={voice.voiceURI}>
                             {voiceLabel(voice)}
@@ -912,18 +949,12 @@ function QuizPlayer({
           ) : (
             <div className="space-y-4">
               <div className="glass-panel p-5 sm:p-6">
-                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div>
-                    <h3 className="text-xl font-semibold">一次完成本 Part 的所有題目</h3>
-                    <p className="mt-1 text-sm text-zinc-500">
-                      已選 {answered} / {section.questions.length}
-                      {checked ? `，本次答對 ${score} 題，錯 ${wrong} 題。批改後答案已固定，按重做才可重新作答。` : ''}
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <button className="quiet-button" type="button" onClick={onResetSection}><RefreshCw className="h-4 w-4" />重做</button>
-                    <button className="dark-button" type="button" disabled={!allAnswered} onClick={onCheck}><Check className="h-4 w-4" />批改</button>
-                  </div>
+                <div>
+                  <h3 className="text-xl font-semibold">一次完成本 Part 的所有題目</h3>
+                  <p className="mt-1 text-sm text-zinc-500">
+                    已選 {answered} / {section.questions.length}
+                    {checked ? `，本次答對 ${score} 題，錯 ${wrong} 題。批改後答案已固定，按重做才可重新作答。` : ''}
+                  </p>
                 </div>
               </div>
 
@@ -970,6 +1001,17 @@ function QuizPlayer({
                 <button className="dark-button" type="button" disabled={sectionIndex >= record.quiz.sections.length - 1} onClick={() => onMoveSection(sectionIndex + 1)}>
                   下一 Part<ChevronRight className="h-4 w-4" />
                 </button>
+              </div>
+
+              <div className="quiz-bottom-actions">
+                <div>
+                  <span>{checked ? `本次答對 ${score} 題，錯 ${wrong} 題` : `已選 ${answered} / ${section.questions.length}`}</span>
+                  <strong>{checked ? '答案已固定，重做才可重新作答。' : '全部選完後再批改。'}</strong>
+                </div>
+                <div className="quiz-bottom-buttons">
+                  <button className="quiet-button" type="button" onClick={onResetSection}><RefreshCw className="h-4 w-4" />重做</button>
+                  <button className="dark-button" type="button" disabled={!allAnswered || checked} onClick={onCheck}><Check className="h-4 w-4" />批改</button>
+                </div>
               </div>
             </div>
           )}
