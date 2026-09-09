@@ -16,7 +16,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { defaultQuizzes } from '../lib/defaultQuizzes';
 import { buildSpeakText, normalizeQuiz } from '../lib/quizSchema';
 import type { ChoiceId, QuizDocument, QuizProgress, QuizQuestion, QuizRecord, QuizSection, StudyItem } from '../lib/quizTypes';
@@ -315,12 +315,21 @@ function voiceLabel(voice: SpeechSynthesisVoice) {
   return `${voice.name} · ${region}`;
 }
 
-function pickSpeechVoice(voices: SpeechSynthesisVoice[], selectedVoiceURI: string, locale: string) {
+function pickSpeechVoice(voices: SpeechSynthesisVoice[], selectedVoiceURI: string, failedVoiceURIs: Set<string>) {
+  if (!selectedVoiceURI) return undefined;
   const selected = voices.find((voice) => voice.voiceURI === selectedVoiceURI);
-  if (selected) return selected;
-  const localeVoice = voices.find((voice) => voice.lang === locale);
-  if (localeVoice) return localeVoice;
-  return voices[0];
+  if (!selected || failedVoiceURIs.has(selected.voiceURI)) return undefined;
+  return selected;
+}
+
+function createSpeechUtterance(text: string, locale: string, voice?: SpeechSynthesisVoice) {
+  const utterance = new SpeechSynthesisUtterance(text);
+  if (voice) utterance.voice = voice;
+  utterance.lang = voice?.lang || locale || 'zh-TW';
+  utterance.rate = 0.82;
+  utterance.pitch = 1;
+  utterance.volume = 1;
+  return utterance;
 }
 
 function orderedQuestions(section: QuizSection, progress: QuizProgress): QuizQuestion[] {
@@ -381,6 +390,8 @@ export default function Home() {
   const [toast, setToast] = useState('');
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [selectedVoiceURI, setSelectedVoiceURI] = useState(() => (typeof window === 'undefined' ? '' : window.localStorage.getItem(VOICE_KEY) || ''));
+  const failedVoiceURIsRef = useRef<Set<string>>(new Set());
+  const speechTimerRef = useRef<number | null>(null);
   const selectedRecord = records.find((record) => record.id === selectedId) ?? null;
 
   useEffect(() => {
@@ -472,42 +483,65 @@ export default function Home() {
       setToast('這個瀏覽器不支援朗讀');
       return;
     }
+    if (speechTimerRef.current) window.clearTimeout(speechTimerRef.current);
     const currentVoices = sortedChineseVoices(synth.getVoices());
     if (currentVoices.length) setVoices(currentVoices);
     const text = buildSpeakText(item);
-    const preferredVoice = pickSpeechVoice(currentVoices.length ? currentVoices : voices, selectedVoiceURI, locale);
+    const voicePool = currentVoices.length ? currentVoices : voices;
+    const preferredVoice = pickSpeechVoice(voicePool, selectedVoiceURI, failedVoiceURIsRef.current);
 
-    const play = (voice?: SpeechSynthesisVoice) => {
-      const utterance = new SpeechSynthesisUtterance(text);
-      if (voice) utterance.voice = voice;
-      utterance.lang = voice?.lang || locale || 'zh-TW';
-      utterance.rate = 0.82;
-      utterance.pitch = 1;
-      utterance.onerror = () => {
-        if (voice) {
-          synth.cancel();
-          const fallback = new SpeechSynthesisUtterance(text);
-          fallback.lang = locale || 'zh-TW';
-          fallback.rate = 0.82;
-          fallback.pitch = 1;
-          synth.speak(fallback);
-          synth.resume();
-          setToast('已改用系統中文語音');
-        } else {
-          setToast('朗讀失敗，請確認裝置不是靜音模式');
-        }
-      };
+    const markVoiceFailed = (voice: SpeechSynthesisVoice) => {
+      failedVoiceURIsRef.current.add(voice.voiceURI);
+      setSelectedVoiceURI('');
+      window.localStorage.removeItem(VOICE_KEY);
       synth.cancel();
-      synth.speak(utterance);
       synth.resume();
+      setToast('這個語音不能用，已切回預設語音');
     };
 
-    play(preferredVoice);
+    const utterance = createSpeechUtterance(text, locale, preferredVoice);
+    utterance.onstart = () => {
+      if (speechTimerRef.current) window.clearTimeout(speechTimerRef.current);
+    };
+    utterance.onend = () => {
+      if (speechTimerRef.current) window.clearTimeout(speechTimerRef.current);
+    };
+    utterance.onerror = () => {
+      if (speechTimerRef.current) window.clearTimeout(speechTimerRef.current);
+      if (preferredVoice) {
+        markVoiceFailed(preferredVoice);
+        return;
+      }
+      synth.cancel();
+      synth.resume();
+      setToast('朗讀失敗，請確認裝置不是靜音模式');
+    };
+
+    synth.cancel();
+    synth.resume();
+    synth.speak(utterance);
+
+    if (preferredVoice) {
+      speechTimerRef.current = window.setTimeout(() => {
+        if (!synth.speaking) markVoiceFailed(preferredVoice);
+      }, 1800);
+    }
   }
 
   function chooseVoice(voiceURI: string) {
+    const synth = window.speechSynthesis;
+    if (speechTimerRef.current) window.clearTimeout(speechTimerRef.current);
+    if (synth) {
+      synth.cancel();
+      synth.resume();
+    }
+    if (voiceURI) failedVoiceURIsRef.current.delete(voiceURI);
     setSelectedVoiceURI(voiceURI);
-    window.localStorage.setItem(VOICE_KEY, voiceURI);
+    if (voiceURI) {
+      window.localStorage.setItem(VOICE_KEY, voiceURI);
+    } else {
+      window.localStorage.removeItem(VOICE_KEY);
+    }
   }
 
   async function chooseAnswer(questionId: string, choiceId: ChoiceId) {
@@ -914,7 +948,7 @@ function QuizPlayer({
                     <label className="voice-picker">
                       <Headphones className="h-4 w-4" />
                       <select value={voiceSelectValue} onChange={(event) => onVoice(event.target.value)} aria-label="朗讀語音">
-                        <option value="">自動中文語音</option>
+                        <option value="">預設語音（最穩）</option>
                         {voices.map((voice) => (
                           <option key={voice.voiceURI} value={voice.voiceURI}>
                             {voiceLabel(voice)}
