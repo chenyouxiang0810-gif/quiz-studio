@@ -264,6 +264,10 @@ button:disabled {
     border-color 220ms ease;
 }
 
+.quiz-card.completed {
+  border-color: rgb(24 24 27 / 18%);
+}
+
 .quiz-shelf {
   padding-bottom: 2rem;
 }
@@ -374,6 +378,26 @@ button:disabled {
   padding: 0.48rem 0.75rem;
 }
 
+.card-badges {
+  align-items: flex-end;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.done-pill {
+  align-items: center;
+  background: #0b0b0d;
+  border-radius: 999px;
+  color: white;
+  display: inline-flex;
+  font-size: 0.76rem;
+  font-weight: 760;
+  gap: 0.25rem;
+  padding: 0.48rem 0.72rem;
+}
+
 .preview-stat {
   background: #f1f1ef;
   border-radius: 18px;
@@ -419,6 +443,10 @@ button:disabled {
   width: 100%;
 }
 
+.section-tab.completed {
+  color: #18181b;
+}
+
 .section-tab span {
   align-items: center;
   background: #efefed;
@@ -430,8 +458,22 @@ button:disabled {
   width: 2rem;
 }
 
+.section-tab.completed span {
+  background: #0b0b0d;
+  color: white;
+}
+
 .section-tab strong {
   font-size: 0.9rem;
+}
+
+.section-check {
+  background: #0b0b0d;
+  border-radius: 999px;
+  color: white;
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 0.12rem;
 }
 
 .section-tab:hover,

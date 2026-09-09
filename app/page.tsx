@@ -253,6 +253,9 @@ const formatTime = (value?: string) =>
     : '尚未記錄';
 const sectionScore = (section: QuizSection, progress: QuizProgress) =>
   section.questions.reduce((score, question) => score + (progress.answers[question.id] === question.correctChoiceId ? 1 : 0), 0);
+const isSectionCompleted = (section: QuizSection, progress: QuizProgress) => Boolean(progress.checkedSections?.[section.id]);
+const completedSectionCount = (record: QuizRecord) => record.quiz.sections.filter((section) => isSectionCompleted(section, record.progress)).length;
+const isQuizCompleted = (record: QuizRecord) => record.quiz.sections.length > 0 && completedSectionCount(record) === record.quiz.sections.length;
 
 function parseChineseLessonNumber(value: string): number | null {
   const digitMap: Record<string, number> = { 零: 0, 〇: 0, 一: 1, 二: 2, 兩: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
@@ -389,7 +392,7 @@ export default function Home() {
   const [importError, setImportError] = useState('');
   const [toast, setToast] = useState('');
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
-  const [selectedVoiceURI, setSelectedVoiceURI] = useState(() => (typeof window === 'undefined' ? '' : window.localStorage.getItem(VOICE_KEY) || ''));
+  const [selectedVoiceURI, setSelectedVoiceURI] = useState('');
   const failedVoiceURIsRef = useRef<Set<string>>(new Set());
   const speechTimerRef = useRef<number | null>(null);
   const selectedRecord = records.find((record) => record.id === selectedId) ?? null;
@@ -399,6 +402,7 @@ export default function Home() {
       setRecords(loadLocalRecords());
       setLoading(false);
     });
+    window.localStorage.removeItem(VOICE_KEY);
   }, []);
 
   useEffect(() => {
@@ -493,7 +497,6 @@ export default function Home() {
     const markVoiceFailed = (voice: SpeechSynthesisVoice) => {
       failedVoiceURIsRef.current.add(voice.voiceURI);
       setSelectedVoiceURI('');
-      window.localStorage.removeItem(VOICE_KEY);
       synth.cancel();
       synth.resume();
       setToast('這個語音不能用，已切回預設語音');
@@ -537,11 +540,6 @@ export default function Home() {
     }
     if (voiceURI) failedVoiceURIsRef.current.delete(voiceURI);
     setSelectedVoiceURI(voiceURI);
-    if (voiceURI) {
-      window.localStorage.setItem(VOICE_KEY, voiceURI);
-    } else {
-      window.localStorage.removeItem(VOICE_KEY);
-    }
   }
 
   async function chooseAnswer(questionId: string, choiceId: ChoiceId) {
@@ -800,24 +798,33 @@ function QuizCard({ record, onOpen, onDelete, locked = false }: { record: QuizRe
   const total = questionCount(record.quiz);
   const terms = record.quiz.sections.reduce((sum, section) => sum + section.studyItems.length, 0);
   const progress = total ? Math.round((answeredCount(record) / total) * 100) : 0;
+  const completedParts = completedSectionCount(record);
+  const completed = isQuizCompleted(record);
   return (
-    <article className="quiz-card group">
+    <article className={`quiz-card group ${completed ? 'completed' : ''}`}>
       <div className="mb-5 flex items-start justify-between gap-3">
         <div>
           <span className="category-pill">{record.quiz.category || '未分類'}</span>
           <h2 className="mt-4 line-clamp-2 text-2xl font-semibold tracking-normal">{record.quiz.title}</h2>
         </div>
-        {locked ? (
-          <span className="locked-pill">Main</span>
-        ) : (
-          <button className="icon-button danger" type="button" aria-label="刪除 Quiz" onClick={onDelete}>
-            <Trash2 className="h-4 w-4" />
-          </button>
-        )}
+        <div className="card-badges">
+          {completed && (
+            <span className="done-pill">
+              <Check className="h-3.5 w-3.5" />完成
+            </span>
+          )}
+          {locked ? (
+            <span className="locked-pill">Main</span>
+          ) : (
+            <button className="icon-button danger" type="button" aria-label="刪除 Quiz" onClick={onDelete}>
+              <Trash2 className="h-4 w-4" />
+            </button>
+          )}
+        </div>
       </div>
       <p className="line-clamp-2 min-h-12 text-sm leading-6 text-zinc-500">{record.quiz.description || '這份 Quiz 尚未加入描述。'}</p>
       <div className="mt-6 grid grid-cols-3 gap-2">
-        <PreviewStat label="Part" value={record.quiz.sections.length} />
+        <PreviewStat label="完成 Part" value={`${completedParts}/${record.quiz.sections.length}`} />
         <PreviewStat label="成語" value={terms} />
         <PreviewStat label="題目" value={total} />
       </div>
@@ -842,7 +849,7 @@ function QuizCard({ record, onOpen, onDelete, locked = false }: { record: QuizRe
   );
 }
 
-function PreviewStat({ label, value }: { label: string; value: number }) {
+function PreviewStat({ label, value }: { label: string; value: number | string }) {
   return (
     <div className="preview-stat">
       <strong>{value}</strong>
@@ -912,12 +919,21 @@ function QuizPlayer({
             </div>
           </div>
           <nav className="mt-5 space-y-2">
-            {record.quiz.sections.map((item, index) => (
-              <button key={item.id} className={`section-tab ${index === sectionIndex ? 'active' : ''}`} type="button" onClick={() => onMoveSection(index)}>
-                <span>{String(index + 1).padStart(2, '0')}</span>
-                <strong>{item.title.replace(/^STEP \d+\s*/, '')}</strong>
-              </button>
-            ))}
+            {record.quiz.sections.map((item, index) => {
+              const completed = isSectionCompleted(item, record.progress);
+              return (
+                <button
+                  key={item.id}
+                  className={`section-tab ${index === sectionIndex ? 'active' : ''} ${completed ? 'completed' : ''}`}
+                  type="button"
+                  onClick={() => onMoveSection(index)}
+                >
+                  <span>{String(index + 1).padStart(2, '0')}</span>
+                  <strong>{item.title.replace(/^STEP \d+\s*/, '')}</strong>
+                  {completed && <Check className="section-check h-4 w-4" aria-label="已完成" />}
+                </button>
+              );
+            })}
           </nav>
         </aside>
 
